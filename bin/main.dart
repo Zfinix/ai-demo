@@ -1,4 +1,3 @@
-#!/usr/bin/env dart
 // ignore_for_file: avoid_print
 
 import 'dart:convert';
@@ -6,29 +5,9 @@ import 'dart:io';
 import 'package:args/args.dart';
 import 'package:dio/dio.dart';
 import 'package:dotenv/dotenv.dart';
-
-/// Configuration for the CLI tool
-class AppConfig {
-  final String? filePath;
-  final String prompt;
-  final String apiKey;
-  final String model;
-  final bool isTextOnly;
-  final bool isPdf;
-
-  const AppConfig({
-    this.filePath,
-    required this.prompt,
-    required this.apiKey,
-    required this.model,
-    required this.isTextOnly,
-    required this.isPdf,
-  });
-}
-
-/// Supported image file extensions
-const List<String> _supportedImageFormats = ['png', 'jpg', 'jpeg', 'webp'];
-const List<String> _supportedPdfFormats = ['pdf'];
+import 'package:mime/mime.dart';
+import 'package:path/path.dart' as path;
+import 'constants.dart';
 
 /// Main entry point - keeps it simple and delegates to focused functions
 void main(List<String> arguments) async {
@@ -52,24 +31,6 @@ void main(List<String> arguments) async {
 
 /// Parse command line arguments and create configuration
 Future<AppConfig> _parseConfiguration(List<String> arguments) async {
-  final parser = ArgParser()
-    ..addOption('file', abbr: 'f', help: 'Path to the image or PDF file')
-    ..addOption('image',
-        abbr: 'i', help: 'Path to the image file (legacy, use --file)')
-    ..addOption('prompt',
-        abbr: 'p', help: 'Prompt for analyzing the file or starting the chat')
-    ..addOption('api-key', abbr: 'k', help: 'OpenRouter API key')
-    ..addOption('model',
-        abbr: 'm',
-        help: 'Model to use',
-        defaultsTo: 'google/gemini-2.0-flash-001')
-    ..addFlag('text',
-        abbr: 't',
-        help: 'Start with text only (no file required)',
-        negatable: false)
-    ..addFlag('help',
-        abbr: 'h', help: 'Show this help message', negatable: false);
-
   final results = parser.parse(arguments);
   final env = DotEnv()..load();
 
@@ -79,115 +40,120 @@ Future<AppConfig> _parseConfiguration(List<String> arguments) async {
     exit(0);
   }
 
-  // Prefer --file, fallback to --image for legacy
-  final filePath = results['file'] as String? ?? results['image'] as String?;
-  final prompt = results['prompt'] as String?;
-  final isTextOnly = results['text'] as bool? ?? false;
-  final apiKey = env['OPENROUTER_API_KEY'] ?? results['api-key'] ?? '';
-  final model = results['model'] as String;
+  final config = AppConfig.fromArgs(results).copyWith(
+    apiKey: env['OPENROUTER_API_KEY'],
+  );
 
   // Validate required fields
-  if (prompt == null || prompt.isEmpty) {
+  if (config.prompt.isEmpty) {
     throw Exception('Prompt is required. Use -p or --prompt\nUse -h for help');
   }
 
-  if (apiKey.isEmpty) {
+  if (config.apiKey.isEmpty) {
     throw Exception(
-        'API key is required. Set OPENROUTER_API_KEY environment variable or use -k');
+      'API key is required. Set OPENROUTER_API_KEY environment variable or use -k',
+    );
   }
 
-  // Validate file requirements for file mode
-  bool isPdf = false;
-  if (!isTextOnly) {
-    await _validateFile(filePath);
-    final ext = filePath!.toLowerCase().split('.').last;
-    isPdf = _supportedPdfFormats.contains(ext);
+  final fileIsValid = await _fileIsValid(config);
+  if (!fileIsValid) {
+    throw Exception('File is not valid. Use -h for help');
   }
 
-  return AppConfig(
-    filePath: filePath,
-    prompt: prompt,
-    apiKey: apiKey,
-    model: model,
-    isTextOnly: isTextOnly,
-    isPdf: isPdf,
-  );
+  return config;
 }
 
 /// Display help information
 void _showHelp(ArgParser parser) {
-  print('🖼️  Image/PDF/Text Analyzer CLI Tool');
-  print(
-      'Usage: dart run bin/main.dart -f <file_path> -p "<prompt>" -k <api_key>');
-  print('   or: dart run bin/main.dart -t -p "<prompt>" -k <api_key>');
-  print('');
-  print('Options:');
-  print(parser.usage);
-  print('');
-  print('Examples:');
-  print(
-      '  dart run bin/main.dart -f screenshot.png -p "What do you see?" -k your_api_key');
-  print(
-      '  dart run bin/main.dart -f document.pdf -p "Summarize this PDF" -k your_api_key');
-  print(
-      '  dart run bin/main.dart -f photo.jpg -p "Describe this image" -k your_api_key -m "google/gemini-2.0-flash-001"');
-  print('  dart run bin/main.dart -t -p "What is the capital of France?"');
-  print('');
-  print('💬 After analysis, you can continue chatting with context!');
-  print('Type "exit" or press Ctrl+C to quit the conversation.');
+  print('''
+🖼️  Image/PDF/Text Analyzer CLI Tool
+
+Usage: dart run bin/main.dart -f <file_path> -p "<prompt>" -k <api_key>
+   or: dart run bin/main.dart -p "<prompt>" -k <api_key>
+
+Options:
+${parser.usage}
+
+Examples:
+  dart run bin/main.dart -f screenshot.png -p "What do you see?" -k your_api_key
+  dart run bin/main.dart -f document.pdf -p "Summarize this PDF" -k your_api_key
+  dart run bin/main.dart -f photo.jpg -p "Describe this image" -k your_api_key -m "google/gemini-2.0-flash-001"
+  dart run bin/main.dart -p "What is the capital of France?"
+
+💬 After analysis, you can continue chatting with context!
+Type "exit" or press Ctrl+C to quit the conversation.
+''');
 }
 
 /// Validate file exists and is supported format (image or PDF)
-Future<void> _validateFile(String? filePath) async {
-  if (filePath == null || filePath.isEmpty) {
-    throw Exception(
-        'File path is required. Use -f or --file\nOr use -t for text-only mode.\nUse -h for help');
+Future<bool> _fileIsValid(AppConfig config) async {
+  if (config.file == null) {
+    return true;
   }
 
-  final file = File(filePath);
-  if (!await file.exists()) {
-    throw Exception('File not found: $filePath');
+  if (!await config.file!.exists()) {
+    throw Exception('File not found: ${config.file}');
   }
 
-  if (!_isFileSupported(filePath)) {
-    throw Exception('Unsupported file format. Supported formats: ${[
-      ..._supportedImageFormats,
-      ..._supportedPdfFormats
-    ].join(', ').toUpperCase()}');
-  }
+  final extension = path.extension(config.file!.path).toLowerCase();
+  return ['png', 'jpg', 'jpeg', 'webp', 'pdf'].contains(extension);
 }
 
 /// Initialize conversation with system message and user's first message
 Future<List<Map<String, dynamic>>> _initializeConversation(
-    AppConfig config) async {
+  AppConfig config,
+) async {
   final conversation = <Map<String, dynamic>>[];
 
   // Add system message - same for all modes
+  final systemContent = switch ((config.isTextOnly, config.isPdf)) {
+    (true, _) => '''
+          You are an AI assistant that engages in conversations.
+          - Provide detailed, accurate answers.
+          - Maintain context throughout the conversation.
+          - Respond in a clear and helpful manner.
+          ''',
+    (false, true) => '''
+          You are an AI assistant that analyzes PDF documents and engages in conversations about them.
+          - Provide detailed, accurate descriptions of the PDF content.
+          - Answer questions about the PDF.
+          - Maintain context throughout the conversation.
+          - If asked, summarize, extract key points, or explain sections of the PDF.
+          ''',
+    _ => '''
+          You are an AI assistant that analyzes images and engages in conversations about them.
+          - Provide detailed, accurate descriptions of the image content.
+          - Answer questions about the image.
+          - Maintain context throughout the conversation.
+          - If asked, identify objects, describe scenes, or explain visual details.
+          '''
+  };
+
   conversation.add({
     'role': 'system',
-    'content': config.isTextOnly
-        ? 'You are an AI assistant that engages in conversations. Provide detailed, accurate answers and maintain context throughout the conversation.'
-        : config.isPdf
-            ? 'You are an AI assistant that analyzes PDF documents and engages in conversations about them. Provide detailed, accurate descriptions and answer questions about the PDF. Maintain context throughout the conversation.'
-            : 'You are an AI assistant that analyzes images and engages in conversations about them. Provide detailed, accurate descriptions and answer questions about images. Maintain context throughout the conversation.',
+    'content': systemContent,
   });
 
   // Add user message (with or without file)
   if (config.isTextOnly) {
-    conversation.add({
-      'role': 'user',
-      'content': config.prompt,
-    });
+    conversation.add(
+      {
+        'role': 'user',
+        'content': config.prompt,
+      },
+    );
   } else {
     // Create file message with base64 encoded file
-    final fileContent = await _createFileContent(
-      config.filePath!,
-      config.prompt,
-      config.isPdf,
-    );
+    final fileContent = await _createFileContent(config);
     conversation.add({
       'role': 'user',
-      'content': fileContent,
+      'content': [
+        {
+          'type': 'text',
+          'text': config.prompt,
+        },
+        fileContent,
+      ],
     });
   }
 
@@ -195,46 +161,27 @@ Future<List<Map<String, dynamic>>> _initializeConversation(
 }
 
 /// Create file content for API request (image or PDF)
-Future<List<Map<String, dynamic>>> _createFileContent(
-    String filePath, String prompt, bool isPdf) async {
-  final file = File(filePath);
-  final fileBytes = await file.readAsBytes();
+Future<Map<String, dynamic>> _createFileContent(AppConfig config) async {
+  final fileBytes = await config.file!.readAsBytes();
   final base64Data = base64Encode(fileBytes);
 
-  final extension = filePath.toLowerCase().split('.').last;
-  if (isPdf) {
-    // PDF
-    return [
-      {'type': 'text', 'text': prompt},
-      {
+  final mimeType = lookupMimeType(path.extension(config.file!.path));
+  final dataUrl = 'data:$mimeType;base64,$base64Data';
+
+  return switch (config.isPdf) {
+    true => {
         'type': 'file',
         'file': {
           'file_data': 'data:application/pdf;base64,$base64Data',
-          'filename': file.uri.pathSegments.last,
+          'filename': path.basename(config.file!.path),
         }
-      }
-    ];
-  } else {
-    // Image
-    final mimeType = _getMimeType(extension);
-    final dataUrl = 'data:$mimeType;base64,$base64Data';
-    return [
-      {'type': 'text', 'text': prompt},
+      },
+    false =>
+      // Image
       {
         'type': 'image_url',
         'image_url': {'url': dataUrl},
-      },
-    ];
-  }
-}
-
-/// Get MIME type from file extension
-String _getMimeType(String extension) {
-  return switch (extension) {
-    'png' => 'image/png',
-    'jpg' || 'jpeg' => 'image/jpeg',
-    'webp' => 'image/webp',
-    _ => 'image/jpeg' // fallback
+      }
   };
 }
 
@@ -243,13 +190,14 @@ Future<void> _handleInitialResponse(
   List<Map<String, dynamic>> conversation,
   AppConfig config,
 ) async {
-  print(
-      '🔍 ${config.isTextOnly ? 'Starting text-only chat' : config.isPdf ? 'Analyzing PDF: ${config.filePath}' : 'Analyzing image: ${config.filePath}'}');
-  print('💬 Initial prompt: ${config.prompt}');
-  print('🤖 Model: ${config.model}');
-  print('');
-  print('🤖 AI Response:');
-  print('─' * 50);
+  print('''
+        🔍 ${config.isTextOnly ? 'Starting text-only chat' : config.isPdf ? 'Analyzing PDF: ${config.file}' : 'Analyzing image: ${config.file}'}
+        💬 Initial prompt: ${config.prompt}
+        🤖 Model: ${config.model}
+
+        🤖 AI Response:
+        ${'─' * 50}
+  ''');
 
   final response = await _getChatResponse(conversation, config);
 
@@ -392,11 +340,4 @@ Stream<String> _parseSSEStream(ResponseBody responseBody) async* {
       }
     }
   }
-}
-
-/// Check if file format is supported (image or PDF)
-bool _isFileSupported(String filePath) {
-  final extension = filePath.toLowerCase().split('.').last;
-  return _supportedImageFormats.contains(extension) ||
-      _supportedPdfFormats.contains(extension);
 }

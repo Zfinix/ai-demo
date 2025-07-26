@@ -53,7 +53,7 @@ OPENROUTER_API_KEY=your_openrouter_api_key_here
 **Simple Mode (main.dart):**
 ```bash
 # Text-only chat
-dart run bin/main.dart -t -p "Hello, what can you help me with?"
+dart run bin/main.dart -p "Hello, what can you help me with?"
 
 # Image analysis
 dart run bin/main.dart -i screenshot.png -p "What do you see in this image?"
