@@ -96,7 +96,7 @@ Future<bool> _fileIsValid(AppConfig config) async {
   }
 
   final extension = path.extension(config.file!.path).toLowerCase();
-  return ['png', 'jpg', 'jpeg', 'webp', 'pdf'].contains(extension);
+  return ['.png', '.jpg', '.jpeg', '.webp', '.pdf'].contains(extension);
 }
 
 /// Initialize conversation with system message and user's first message
